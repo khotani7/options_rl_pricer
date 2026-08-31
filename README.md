@@ -22,31 +22,31 @@ python main.py --ticker AAPL --option-type put
 ### Edge Scanner (Find Mispriced Options)
 ```bash
 # Scan for trading opportunities
-python edge_scanner.py --ticker AAPL --min-edge 5.0
+python scripts/edge_scanner.py --ticker AAPL --min-edge 5.0
 
 # Diagnose specific option
-python diagnose_edge.py --ticker AAPL --strike 305 --expiry 2026-09-11 --type call
+python scripts/diagnose_edge.py --ticker AAPL --strike 305 --expiry 2026-09-11 --type call
 ```
 
 ### Backtesting
 ```bash
 # Run strategy backtest
-python run_backtest.py --tickers AAPL --start 2023-01-01 --end 2024-08-31
+python scripts/run_backtest.py --tickers AAPL --start 2023-01-01 --end 2024-08-31
 
 # Comprehensive stress test
-python stress_test.py --mode all
+python scripts/stress_test.py --mode all
 
 # Analyze results
-python analyze_stress_test.py
+python scripts/analyze_stress_test.py
 ```
 
 ### Paper Trading (Interactive Brokers)
 ```bash
 # Setup IB Gateway first (see docs/IB_SETUP_GUIDE.md)
-python run_trader.py --mode paper --tickers AAPL
+python scripts/run_trader.py --mode paper --tickers AAPL
 
 # Live trading (use with extreme caution!)
-python run_trader.py --mode live --tickers AAPL
+python scripts/run_trader.py --mode live --tickers AAPL
 ```
 
 ---
@@ -92,12 +92,14 @@ evaluation/
   plots.py                  Convergence/boundary/price charts
 
 # Trading System (NEW)
-edge_scanner.py             Find mispriced options (LSM vs market)
-diagnose_edge.py            Debug specific option pricing
-run_backtest.py             Strategy backtesting CLI
-stress_test.py              Comprehensive stress testing
-analyze_stress_test.py      Results analysis
-run_trader.py               Automated trading CLI
+scripts/
+  edge_scanner.py           Find mispriced options (LSM vs market)
+  diagnose_edge.py          Debug specific option pricing
+  run_backtest.py           Strategy backtesting CLI
+  run_trader.py             Automated trading CLI
+  stress_test.py            Comprehensive stress testing
+  analyze_stress_test.py    Results analysis
+  test_backtest.py          Quick backtest smoke test
 
 backtesting/
   engine.py                 Backtest simulation engine
@@ -250,22 +252,22 @@ python main.py --ticker AAPL --option-type put --quick
 ### Find Trading Opportunities
 ```bash
 # Scan AAPL chain for 5%+ edge
-python edge_scanner.py --ticker AAPL --min-edge 5.0
+python scripts/edge_scanner.py --ticker AAPL --min-edge 5.0
 
 # Diagnose why option shows edge
-python diagnose_edge.py --ticker AAPL --strike 300 --expiry 2026-09-30 --type put
+python scripts/diagnose_edge.py --ticker AAPL --strike 300 --expiry 2026-09-30 --type put
 ```
 
 ### Backtest Strategy
 ```bash
 # 3-month backtest
-python run_backtest.py --tickers AAPL --start 2024-06-01 --end 2024-08-31
+python scripts/run_backtest.py --tickers AAPL --start 2024-06-01 --end 2024-08-31
 
 # Comprehensive stress test (35 scenarios)
-python stress_test.py --mode all
+python scripts/stress_test.py --mode all
 
 # Analyze results
-python analyze_stress_test.py
+python scripts/analyze_stress_test.py
 ```
 
 ### Paper Trading
@@ -274,7 +276,7 @@ python analyze_stress_test.py
 # See docs/IB_SETUP_GUIDE.md
 
 # Start paper trader
-python run_trader.py --mode paper --tickers AAPL XOM JPM
+python scripts/run_trader.py --mode paper --tickers AAPL XOM JPM
 
 # Monitor real-time (Ctrl+C to stop)
 ```
