@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "note": "Fallback calibration snapshot used when a live yfinance pull is unavailable (e.g. sandboxed/offline execution). On a machine with normal internet access, market_data.fetch_market_params() pulls these fields live instead of reading this file.",
+    "as_of": "2026-08-31",
+    "sources": [
+      "https://stockanalysis.com/stocks/aapl/",
+      "https://stockanalysis.com/stocks/jpm/",
+      "https://stockanalysis.com/stocks/deck/",
+      "https://www.barchart.com/stocks/quotes/AAPL/volatility-charts",
+      "https://www.barchart.com/stocks/quotes/JPM/volatility-charts",
+      "https://www.barchart.com/stocks/quotes/DECK/volatility-charts",
+      "https://fred.stlouisfed.org/series/DGS10",
+      "https://ycharts.com/indicators/3_month_t_bill"
+    ]
+  },
+  "risk_free_rate_3m": 0.0369,
+  "tickers": {
+    "AAPL": {
+      "spot": 315.58,
+      "market_cap": 4.61e12,
+      "dividend_yield": 0.0034,
+      "beta": 1.09,
+      "hist_vol": 0.3023,
+      "implied_vol": 0.2443
+    },
+    "JPM": {
+      "spot": 355.90,
+      "market_cap": 946.05e9,
+      "dividend_yield": 0.0169,
+      "beta": 0.98,
+      "hist_vol": 0.1729,
+      "implied_vol": 0.2217
+    },
+    "DECK": {
+      "spot": 87.67,
+      "market_cap": 11.94e9,
+      "dividend_yield": 0.0,
+      "beta": 1.17,
+      "hist_vol": 0.3623,
+      "implied_vol": 0.5757
+    }
+  }
+}
