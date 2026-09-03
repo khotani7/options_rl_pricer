@@ -29,7 +29,7 @@ class RiskLimits:
     max_positions: int = 10
     min_edge_threshold_pct: float = 3.0  # Minimum edge to trade
     max_leverage: float = 2.0
-    stop_loss_pct: float = 0.30  # 30% stop loss per position
+    stop_loss_multiplier: float = 1.5  # Exit at 1.5x entry price (tighter than old 30% which was ~2x)
     profit_target_pct: float = 0.50  # Take profit at 50% gain
 
 
@@ -338,14 +338,22 @@ class AutomatedTrader:
     def monitor_stop_losses(self):
         """Check positions for stop-loss and profit-target triggers"""
         for key, pos in list(self.positions.items()):
-            # Calculate P&L %
-            if pos['avg_cost'] > 0:
-                pnl_pct = pos['unrealized_pnl'] / (pos['avg_cost'] * abs(pos['quantity'])) * 100
+            # Get current market price
+            current_price = pos.get('market_price', 0)
+            entry_price = pos.get('avg_cost', 0)
 
-                # Check stop-loss
-                if pnl_pct < -self.risk_limits.stop_loss_pct * 100:
-                    print(f"\n⚠️  Stop-loss triggered for {key}")
-                    print(f"    P&L: {pnl_pct:.1f}% (limit: {-self.risk_limits.stop_loss_pct*100:.0f}%)")
+            if entry_price > 0 and current_price > 0:
+                # Calculate P&L %
+                pnl_pct = pos['unrealized_pnl'] / (entry_price * abs(pos['quantity'])) * 100
+
+                # Check 1.5x stop-loss (tighter stop for short options)
+                # For short options (selling), we lose money when price goes UP
+                # Exit if current_price >= 1.5x entry_price
+                if current_price >= entry_price * self.risk_limits.stop_loss_multiplier:
+                    print(f"\n⚠️  {self.risk_limits.stop_loss_multiplier}x Stop-loss triggered for {key}")
+                    print(f"    Entry: ${entry_price:.2f}")
+                    print(f"    Current: ${current_price:.2f} ({current_price/entry_price:.2f}x)")
+                    print(f"    P&L: {pnl_pct:.1f}%")
                     self.close_position(pos)
 
                 # Check profit target

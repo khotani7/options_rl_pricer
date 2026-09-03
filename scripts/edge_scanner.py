@@ -42,6 +42,7 @@ import yfinance as yf
 from data.market_data import fetch_market_params
 from pricing.lsm import longstaff_schwartz_price
 from simulation.gbm import simulate_gbm_paths
+from strategies.earnings_filter import has_upcoming_earnings, calculate_earnings_risk_score
 
 # LSM sizing for the scanner: enough for a stable price estimate on a single
 # contract in well under a second, small enough to scan a whole chain.
@@ -51,6 +52,22 @@ LSM_N_PATHS = 6000  # Fixed number of paths
 # Minimum days to expiry - below this, LSM with reasonable computation time
 # cannot accurately price the option due to time discretization issues
 MIN_DAYS_TO_EXPIRY = 5
+
+# Dynamic edge thresholds by ticker
+# Lower threshold for high-liquidity tickers, higher for volatile ones
+EDGE_THRESHOLDS = {
+    'AAPL': 2.0,   # High liquidity
+    'MSFT': 2.0,   # High liquidity
+    'GOOGL': 2.0,  # High liquidity
+    'AMZN': 2.5,   # High liquidity
+    'NVDA': 2.5,   # High liquidity, volatile
+    'META': 2.5,   # High liquidity
+    'TSLA': 4.0,   # Very volatile
+    'MSTR': 5.0,   # Extremely volatile
+    'GME': 5.0,    # Meme stock - very volatile
+    'AMC': 5.0,    # Meme stock - very volatile
+    'default': 3.0 # Conservative default
+}
 
 
 def _adaptive_n_steps(days_to_expiry: int) -> int:
@@ -98,6 +115,19 @@ def scan_option_chain(ticker: str, min_volume: int = 5, min_edge_pct: float = 3.
     or None if nothing clears the filters. This function only reads market
     data and computes prices -- it never places an order.
     """
+    # Get dynamic edge threshold for this ticker
+    min_edge_pct = EDGE_THRESHOLDS.get(ticker, EDGE_THRESHOLDS['default'])
+
+    # Check earnings calendar - skip if earnings within 7 days
+    has_earnings, earnings_date = has_upcoming_earnings(ticker, days_ahead=7)
+    if has_earnings:
+        print(f"\n{'='*70}")
+        print(f"⊗ SKIPPING {ticker} - Earnings on {earnings_date.strftime('%Y-%m-%d')}")
+        print(f"{'='*70}")
+        print(f"  Reason: Too close to earnings (high risk of IV crush & gap moves)")
+        print(f"  Will resume scanning after earnings pass")
+        return None
+
     params = fetch_market_params(ticker)
     spot, r, q = params.spot, params.risk_free_rate, params.dividend_yield
 
@@ -105,6 +135,7 @@ def scan_option_chain(ticker: str, min_volume: int = 5, min_edge_pct: float = 3.
     print(f"Edge Scanner (LSM fair value): {ticker}")
     print(f"{'='*70}")
     print(f"Spot: ${spot:.2f} | r={r:.2%} | q={q:.2%}")
+    print(f"Min edge: {min_edge_pct:.1f}% (dynamic threshold for {ticker})")
     print(f"Data source: {params.source} | As of: {params.as_of}\n")
 
     t = yf.Ticker(ticker)
