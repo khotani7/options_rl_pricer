@@ -31,6 +31,18 @@ class IBConfig:
     port: int = 7497  # 7497 = paper trading, 7496 = live
     client_id: int = 1
     account: str = ""  # Leave empty to use default account
+    # Market data type is NOT a Gateway/TWS UI setting -- it's requested by
+    # the API client after connecting, via reqMarketDataType(). There is no
+    # checkbox for this in Gateway's Configure menu.
+    #   1 = live (requires a paid real-time data subscription)
+    #   2 = frozen (last live snapshot before market close)
+    #   3 = delayed (free, ~15-20 min behind, used automatically as a
+    #       fallback if you don't have a live subscription for a symbol)
+    #   4 = delayed-frozen
+    # Most paper trading accounts have no live data subscriptions, so this
+    # defaults to 3 -- without it, reqMktData calls on unsubscribed symbols
+    # return empty/stale ticks instead of falling back to delayed data.
+    market_data_type: int = 3
 
 
 class IBConnector:
@@ -67,6 +79,14 @@ class IBConnector:
 
             self.connected = True
 
+            # Request delayed data as a fallback for any symbol without a
+            # live subscription -- this is the actual "enable delayed data"
+            # step for an API client; it has no equivalent in Gateway's UI.
+            data_type_names = {1: 'live', 2: 'frozen', 3: 'delayed', 4: 'delayed-frozen'}
+            self.ib.reqMarketDataType(self.config.market_data_type)
+            print(f"✓ Market data type requested: "
+                  f"{data_type_names.get(self.config.market_data_type, self.config.market_data_type)}")
+
             # Get account info
             account_values = self.ib.accountValues()
             for av in account_values:
@@ -93,18 +113,6 @@ class IBConnector:
 
     def create_option_contract(self, ticker: str, expiry: str, strike: float,
                                right: str = 'P') -> Option:
-        """
-        Create an option contract object
-
-        Args:
-            ticker: Stock symbol (e.g., 'AAPL')
-            expiry: Expiry date in YYYYMMDD format (e.g., '20261002')
-            strike: Strike price
-            right: 'P' for put, 'C' for call
-
-        Returns:
-            Option contract object
-        """
         contract = Option(
             symbol=ticker,
             lastTradeDateOrContractMonth=expiry,
@@ -113,46 +121,49 @@ class IBConnector:
             exchange='SMART',
             currency='USD'
         )
-
-        # Qualify the contract (get full contract details)
         self.ib.qualifyContracts(contract)
-
         return contract
 
     def get_market_data(self, contract: Contract, timeout: int = 10) -> Optional[Dict]:
-        """
-        Get real-time market data for a contract
-
-        Returns dict with bid, ask, last, etc.
-        """
         if not self.connected:
             print("Not connected to IB")
             return None
-
         try:
-            # Request market data
             ticker = self.ib.reqMktData(contract, '', False, False)
-
-            # Wait for data
             start = time.time()
-            while (ticker.bid == -1 or ticker.ask == -1) and (time.time() - start < timeout):
-                self.ib.sleep(0.1)
 
-            if ticker.bid == -1 or ticker.ask == -1:
-                print(f"No market data received for {contract}")
+            # Wait for market data, checking both live and delayed fields
+            while (time.time() - start < timeout):
+                self.ib.sleep(0.5)
+
+                # Check if we have valid bid/ask (either live or delayed)
+                has_bid = ticker.bid is not None and ticker.bid > 0 and ticker.bid != -1
+                has_ask = ticker.ask is not None and ticker.ask > 0 and ticker.ask != -1
+
+                # For delayed data, also check delayedBid/delayedAsk
+                has_delayed_bid = hasattr(ticker, 'delayedBid') and ticker.delayedBid and ticker.delayedBid > 0
+                has_delayed_ask = hasattr(ticker, 'delayedAsk') and ticker.delayedAsk and ticker.delayedAsk > 0
+
+                if (has_bid and has_ask) or (has_delayed_bid and has_delayed_ask):
+                    break
+
+            # Use delayed data if live not available
+            bid = ticker.bid if (ticker.bid and ticker.bid > 0) else getattr(ticker, 'delayedBid', None)
+            ask = ticker.ask if (ticker.ask and ticker.ask > 0) else getattr(ticker, 'delayedAsk', None)
+            last = ticker.last if (ticker.last and ticker.last > 0) else getattr(ticker, 'delayedLast', None)
+
+            # Validate we have usable data
+            if not bid or not ask or bid <= 0 or ask <= 0:
                 return None
 
             return {
-                'bid': ticker.bid,
-                'ask': ticker.ask,
-                'last': ticker.last,
-                'mid': (ticker.bid + ticker.ask) / 2,
-                'bidSize': ticker.bidSize,
-                'askSize': ticker.askSize,
+                'bid': float(bid), 'ask': float(ask),
+                'last': float(last) if last else None,
+                'mid': (float(bid) + float(ask)) / 2,
+                'bidSize': ticker.bidSize, 'askSize': ticker.askSize,
                 'volume': ticker.volume,
                 'iv': ticker.impliedVolatility if ticker.impliedVolatility else None
             }
-
         except Exception as e:
             print(f"Error getting market data: {e}")
             return None
@@ -160,24 +171,8 @@ class IBConnector:
     def place_order(self, contract: Contract, action: str, quantity: int,
                    order_type: str = 'LMT', limit_price: Optional[float] = None,
                    transmit: bool = True) -> Trade:
-        """
-        Place an options order
-
-        Args:
-            contract: Option contract
-            action: 'BUY' or 'SELL'
-            quantity: Number of contracts
-            order_type: 'MKT' (market) or 'LMT' (limit)
-            limit_price: Required for limit orders
-            transmit: If False, order is staged but not sent
-
-        Returns:
-            Trade object
-        """
         if not self.connected:
             raise ConnectionError("Not connected to IB")
-
-        # Create order
         if order_type == 'MKT':
             order = MarketOrder(action, quantity)
         elif order_type == 'LMT':
@@ -187,22 +182,19 @@ class IBConnector:
         else:
             raise ValueError(f"Unknown order type: {order_type}")
 
+        # Set order properties to avoid IB preset conflicts
+        order.tif = 'DAY'  # Time in force
+        order.outsideRth = False  # Don't allow outside regular trading hours
         order.transmit = transmit
 
-        # Place order
         trade = self.ib.placeOrder(contract, order)
-
-        # Store in open orders
         self.open_orders[trade.order.orderId] = trade
-
         print(f"{'✓' if transmit else '○'} Order placed: {action} {quantity}x {contract.symbol} "
               f"{contract.strike}{contract.right} {contract.lastTradeDateOrContractMonth} "
               f"@ {'MKT' if order_type == 'MKT' else f'${limit_price:.2f}'}")
-
         return trade
 
     def cancel_order(self, order_id: int):
-        """Cancel an open order"""
         if order_id in self.open_orders:
             self.ib.cancelOrder(self.open_orders[order_id].order)
             print(f"Order {order_id} cancelled")
@@ -210,56 +202,38 @@ class IBConnector:
             print(f"Order {order_id} not found")
 
     def get_positions(self) -> List[Dict]:
-        """
-        Get all current positions
-
-        Returns list of position dicts
-        """
         if not self.connected:
             return []
-
         positions = []
         for position in self.ib.positions():
+            # Some position attributes might not exist, use getattr with defaults
             positions.append({
                 'contract': position.contract,
                 'quantity': position.position,
-                'avg_cost': position.avgCost,
-                'market_value': position.marketValue,
-                'unrealized_pnl': position.unrealizedPNL,
-                'realized_pnl': position.realizedPNL
+                'avg_cost': getattr(position, 'avgCost', 0.0),
+                'market_value': getattr(position, 'marketValue', 0.0),
+                'unrealized_pnl': getattr(position, 'unrealizedPNL', 0.0),
+                'realized_pnl': getattr(position, 'realizedPNL', 0.0)
             })
-
         return positions
 
     def get_account_summary(self) -> Dict:
-        """Get account summary"""
         if not self.connected:
             return {}
-
         summary = {}
         for av in self.ib.accountValues():
             summary[av.tag] = av.value
-
         return summary
 
     def get_open_orders(self) -> List[Trade]:
-        """Get all open orders"""
         if not self.connected:
             return []
-
         return self.ib.openTrades()
 
     def wait_for_fill(self, trade: Trade, timeout: int = 60) -> bool:
-        """
-        Wait for an order to fill
-
-        Returns True if filled, False if timeout
-        """
         start = time.time()
-
         while trade.orderStatus.status != 'Filled' and (time.time() - start < timeout):
             self.ib.sleep(1)
-
         if trade.orderStatus.status == 'Filled':
             print(f"✓ Order {trade.order.orderId} filled @ ${trade.orderStatus.avgFillPrice:.2f}")
             return True
@@ -268,93 +242,57 @@ class IBConnector:
             return False
 
     def subscribe_to_fills(self, callback: Callable):
-        """
-        Subscribe to order fill events
-
-        callback: function(trade) called when order fills
-        """
         self.ib.orderStatusEvent += callback
 
     def run_event_loop(self):
-        """
-        Run the IB event loop
-
-        Call this to keep connection alive and process events
-        """
         self.ib.run()
 
 
-# Mock connector for testing without IB connection
 class MockIBConnector:
-    """
-    Mock IB connector for testing strategies without actual IB connection
-
-    Simulates IB API behavior for development
-    """
+    """Mock IB connector for testing strategies without actual IB connection"""
 
     def __init__(self, config: IBConfig):
         self.config = config
         self.connected = False
-        self.account_value = 100000.0  # Mock $100k account
+        self.account_value = 100000.0
         self.positions = {}
         self.open_orders = {}
         self.order_id_counter = 1000
 
     def connect(self) -> bool:
-        """Mock connection"""
         self.connected = True
         print(f"✓ [MOCK] Connected to IB (simulated)")
         print(f"✓ [MOCK] Account value: ${self.account_value:,.2f}")
         return True
 
     def disconnect(self):
-        """Mock disconnect"""
         self.connected = False
         print("[MOCK] Disconnected")
 
     def create_option_contract(self, ticker: str, expiry: str, strike: float, right: str = 'P'):
-        """Mock contract creation"""
-        return {
-            'symbol': ticker,
-            'expiry': expiry,
-            'strike': strike,
-            'right': right
-        }
+        return {'symbol': ticker, 'expiry': expiry, 'strike': strike, 'right': right}
 
     def get_market_data(self, contract, timeout: int = 10):
-        """Mock market data - returns fake bid/ask"""
-        import random
         base_price = 10.0
         spread = 0.20
-
         return {
-            'bid': base_price - spread/2,
-            'ask': base_price + spread/2,
-            'last': base_price,
-            'mid': base_price,
-            'bidSize': 10,
-            'askSize': 10,
-            'volume': 100,
-            'iv': 0.25
+            'bid': base_price - spread/2, 'ask': base_price + spread/2,
+            'last': base_price, 'mid': base_price,
+            'bidSize': 10, 'askSize': 10, 'volume': 100, 'iv': 0.25
         }
 
     def place_order(self, contract, action: str, quantity: int, order_type: str = 'LMT',
                    limit_price: Optional[float] = None, transmit: bool = True):
-        """Mock order placement"""
         order_id = self.order_id_counter
         self.order_id_counter += 1
-
         print(f"✓ [MOCK] Order placed: {action} {quantity}x {contract.get('symbol', contract)} "
               f"@ {order_type} {f'${limit_price:.2f}' if limit_price else 'MKT'}")
-
         return {'order_id': order_id, 'status': 'Filled'}
 
     def get_positions(self):
-        """Mock positions"""
         return []
 
     def get_account_summary(self):
-        """Mock account summary"""
         return {
             'NetLiquidation': self.account_value,
             'TotalCashValue': self.account_value * 0.8,
@@ -362,5 +300,4 @@ class MockIBConnector:
         }
 
     def get_open_orders(self):
-        """Mock open orders"""
         return []

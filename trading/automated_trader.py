@@ -30,6 +30,7 @@ class RiskLimits:
     min_edge_threshold_pct: float = 3.0  # Minimum edge to trade
     max_leverage: float = 2.0
     stop_loss_pct: float = 0.30  # 30% stop loss per position
+    profit_target_pct: float = 0.50  # Take profit at 50% gain
 
 
 @dataclass
@@ -205,18 +206,28 @@ class AutomatedTrader:
                 print(f"  Scanning {ticker}...")
 
                 # Use edge scanner (LSM fair value vs. market -- see edge_scanner.py)
-                df = scan_option_chain(ticker, min_volume=5, min_edge_pct=self.risk_limits.min_edge_threshold_pct)
+                # Filter for near-the-money options (85% - 115% of spot)
+                # This avoids deep OTM lottery tickets that will never hit
+                df = scan_option_chain(ticker, min_volume=5,
+                                      min_edge_pct=self.risk_limits.min_edge_threshold_pct,
+                                      min_moneyness=0.85, max_moneyness=1.15)
 
                 if df is None or df.empty:
                     print(f"    No opportunities found")
                     continue
 
                 # Take best opportunity
+                print(f"    Found {len(df)} opportunities")
                 best_opp = df.iloc[0]
+                print(f"    Best: {best_opp['signal']} ${best_opp['strike']:.0f} @ ${best_opp['market_mid']:.2f} ({best_opp['edge_pct']:+.1f}%)")
 
                 # Check position sizing
                 if not self.check_position_size(best_opp['market_mid']):
+                    position_value = best_opp['market_mid'] * 100
+                    position_pct = (position_value / self.ib.account_value) * 100
                     print(f"    Position too large for risk limits")
+                    print(f"    Option price: ${best_opp['market_mid']:.2f} → Position value: ${position_value:.2f}")
+                    print(f"    Position %: {position_pct:.2f}% (limit: {self.risk_limits.max_position_size*100:.1f}%)")
                     continue
 
                 # Execute trade
@@ -325,7 +336,7 @@ class AutomatedTrader:
             print(f"Error updating positions: {e}")
 
     def monitor_stop_losses(self):
-        """Check positions for stop-loss triggers"""
+        """Check positions for stop-loss and profit-target triggers"""
         for key, pos in list(self.positions.items()):
             # Calculate P&L %
             if pos['avg_cost'] > 0:
@@ -335,8 +346,12 @@ class AutomatedTrader:
                 if pnl_pct < -self.risk_limits.stop_loss_pct * 100:
                     print(f"\n⚠️  Stop-loss triggered for {key}")
                     print(f"    P&L: {pnl_pct:.1f}% (limit: {-self.risk_limits.stop_loss_pct*100:.0f}%)")
+                    self.close_position(pos)
 
-                    # Close position
+                # Check profit target
+                elif pnl_pct > self.risk_limits.profit_target_pct * 100:
+                    print(f"\n✓ Profit target hit for {key}")
+                    print(f"    P&L: {pnl_pct:.1f}% (target: {self.risk_limits.profit_target_pct*100:.0f}%)")
                     self.close_position(pos)
 
     def close_position(self, position: Dict):

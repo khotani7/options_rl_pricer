@@ -89,7 +89,8 @@ def _lsm_fair_value(spot, K, T, r, q, iv, option_type, days_to_expiry, seed):
 
 
 def scan_option_chain(ticker: str, min_volume: int = 5, min_edge_pct: float = 3.0,
-                       max_expiries: int = 3, seed: int = 0):
+                       max_expiries: int = 3, seed: int = 0,
+                       min_moneyness: float = 0.85, max_moneyness: float = 1.15):
     """
     Scan a real option chain for LSM-vs-market mispricing.
 
@@ -138,10 +139,23 @@ def scan_option_chain(ticker: str, min_volume: int = 5, min_edge_pct: float = 3.
 
                     K = row["strike"]
                     iv = row["impliedVolatility"]
-                    market_mid = (row["bid"] + row["ask"]) / 2
-                    spread = row["ask"] - row["bid"]
+                    bid = row["bid"]
+                    ask = row["ask"]
 
-                    if iv <= 0 or market_mid <= 0:
+                    # Filter by moneyness - avoid deep OTM options
+                    moneyness = K / spot
+                    if moneyness < min_moneyness or moneyness > max_moneyness:
+                        continue
+
+                    # Filter out NaN or invalid prices
+                    import math
+                    if math.isnan(bid) or math.isnan(ask) or bid <= 0 or ask <= 0:
+                        continue
+
+                    market_mid = (bid + ask) / 2
+                    spread = ask - bid
+
+                    if iv <= 0 or market_mid <= 0 or math.isnan(market_mid):
                         continue
                     if spread >= market_mid * 0.15:  # ignore wide spreads
                         continue

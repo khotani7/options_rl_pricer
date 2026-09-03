@@ -22,10 +22,10 @@ python main.py --ticker AAPL --option-type put
 ### Edge Scanner (Find Mispriced Options)
 ```bash
 # Scan for trading opportunities
-python scripts/edge_scanner.py --ticker AAPL --min-edge 5.0
+PYTHONPATH=. python scripts/edge_scanner.py --ticker AAPL --min-edge 5.0
 
 # Diagnose specific option
-python scripts/diagnose_edge.py --ticker AAPL --strike 305 --expiry 2026-09-11 --type call
+PYTHONPATH=. python scripts/diagnose_edge.py --ticker AAPL --strike 305 --expiry 2026-09-11 --type call
 ```
 
 ### Backtesting
@@ -43,10 +43,13 @@ python scripts/analyze_stress_test.py
 ### Paper Trading (Interactive Brokers)
 ```bash
 # Setup IB Gateway first (see docs/IB_SETUP_GUIDE.md)
-python scripts/run_trader.py --mode paper --tickers AAPL
+PYTHONPATH=. python scripts/run_trader.py --mode paper --tickers AAPL
+
+# Daily automated trader (scheduled with cron)
+PYTHONPATH=. python scripts/daily_trader.py --mode paper --tickers AAPL
 
 # Live trading (use with extreme caution!)
-python scripts/run_trader.py --mode live --tickers AAPL
+PYTHONPATH=. python scripts/run_trader.py --mode live --tickers AAPL
 ```
 
 ---
@@ -97,9 +100,12 @@ scripts/
   diagnose_edge.py          Debug specific option pricing
   run_backtest.py           Strategy backtesting CLI
   run_trader.py             Automated trading CLI
+  daily_trader.py           Daily automated trading (cron-friendly)
   stress_test.py            Comprehensive stress testing
   analyze_stress_test.py    Results analysis
   test_backtest.py          Quick backtest smoke test
+  close_all_positions.py    Emergency position closer
+  cancel_pending_orders.py  Cancel all pending orders
 
 backtesting/
   engine.py                 Backtest simulation engine
@@ -116,6 +122,8 @@ docs/
   SYSTEM_SUMMARY.md         Complete system overview
   TRADING_GUIDE.md          Comprehensive trading docs
   IB_SETUP_GUIDE.md         Interactive Brokers setup
+  AUTOMATED_TRADER_SETUP.md Live automated trading setup
+  DAILY_TRADER_SETUP.md     Scheduled trading with cron
   BACKTEST_ANALYSIS.md      Backtest results analysis
   STRESS_TEST_RESULTS.md    Stress test findings
   EDGE_SCANNER_FIX.md       Edge scanner bug fix details

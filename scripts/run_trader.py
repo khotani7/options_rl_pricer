@@ -53,6 +53,10 @@ def main():
                        help='Max daily loss % (circuit breaker)')
     parser.add_argument('--stop-loss', type=float, default=30.0,
                        help='Stop loss % per position')
+    parser.add_argument('--max-position-size', type=float, default=5.0,
+                       help='Max position size as % of account (default: 5.0)')
+    parser.add_argument('--client-id', type=int, default=1,
+                       help='IB API client ID (use different IDs for multiple connections)')
 
     args = parser.parse_args()
 
@@ -87,7 +91,7 @@ def main():
     ib_config = IBConfig(
         host=args.host,
         port=port,
-        client_id=1
+        client_id=args.client_id
     )
 
     risk_limits = RiskLimits(
@@ -95,7 +99,7 @@ def main():
         max_daily_loss=args.max_daily_loss / 100.0,
         min_edge_threshold_pct=args.min_edge,
         stop_loss_pct=args.stop_loss / 100.0,
-        max_position_size=0.05,  # 5% per position
+        max_position_size=args.max_position_size / 100.0,
         max_portfolio_exposure=0.20  # 20% total exposure
     )
 
