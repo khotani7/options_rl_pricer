@@ -23,14 +23,14 @@ import pandas as pd
 @dataclass
 class RiskLimits:
     """Risk management parameters"""
-    max_portfolio_exposure: float = 0.20  # 20% of account
-    max_position_size: float = 0.05  # 5% per position
+    max_portfolio_exposure: float = 0.50  # 50% of account notional (for short options with stops)
+    max_position_size: float = 0.05  # 5% per position (premium)
     max_daily_loss: float = 0.02  # 2% max daily loss
     max_positions: int = 10
     min_edge_threshold_pct: float = 3.0  # Minimum edge to trade
     max_leverage: float = 2.0
-    stop_loss_multiplier: float = 1.5  # Exit at 1.5x entry price (tighter than old 30% which was ~2x)
-    profit_target_pct: float = 0.50  # Take profit at 50% gain
+    stop_loss_multiplier: float = 1.25  # Exit at 1.25x entry price = 25% loss (for short options)
+    profit_target_pct: float = 0.25  # Take profit at 25% gain (capture theta, avoid gamma risk)
 
 
 @dataclass
@@ -43,6 +43,13 @@ class TradingConfig:
     order_timeout_seconds: int = 60
     use_limit_orders: bool = True  # False = market orders
     log_file: str = 'outputs/trading_log.json'
+    min_premium: float = 0.0  # Minimum option premium ($)
+    min_moneyness: float = 0.85  # Min strike/spot ratio
+    max_moneyness: float = 1.15  # Max strike/spot ratio
+    min_dte: int = 0  # Minimum days to expiration
+    max_dte: int = 365  # Maximum days to expiration
+    max_spread_pct: float = 100.0  # Max bid-ask spread %
+    min_iv_percentile: float = 0.0  # Min IV percentile (0-100)
 
 
 class AutomatedTrader:
@@ -206,18 +213,58 @@ class AutomatedTrader:
                 print(f"  Scanning {ticker}...")
 
                 # Use edge scanner (LSM fair value vs. market -- see edge_scanner.py)
-                # Filter for near-the-money options (85% - 115% of spot)
-                # This avoids deep OTM lottery tickets that will never hit
                 df = scan_option_chain(ticker, min_volume=5,
                                       min_edge_pct=self.risk_limits.min_edge_threshold_pct,
-                                      min_moneyness=0.85, max_moneyness=1.15)
+                                      min_moneyness=self.trading_config.min_moneyness,
+                                      max_moneyness=self.trading_config.max_moneyness)
 
                 if df is None or df.empty:
                     print(f"    No opportunities found")
                     continue
 
+                # Apply additional filters
+                original_count = len(df)
+                filter_reasons = []
+
+                # Filter by minimum premium
+                if self.trading_config.min_premium > 0:
+                    before = len(df)
+                    df = df[df['market_mid'] >= self.trading_config.min_premium]
+                    if len(df) < before:
+                        filter_reasons.append(f"min_premium=${self.trading_config.min_premium:.2f}")
+
+                # Filter by minimum days to expiration
+                if self.trading_config.min_dte > 0:
+                    before = len(df)
+                    from datetime import datetime, timedelta
+                    min_expiry = (datetime.now() + timedelta(days=self.trading_config.min_dte)).strftime('%Y-%m-%d')
+                    df = df[df['expiry'] >= min_expiry]
+                    if len(df) < before:
+                        filter_reasons.append(f"min_dte={self.trading_config.min_dte}d")
+
+                # Filter by maximum days to expiration
+                if self.trading_config.max_dte < 365:
+                    before = len(df)
+                    from datetime import datetime, timedelta
+                    max_expiry = (datetime.now() + timedelta(days=self.trading_config.max_dte)).strftime('%Y-%m-%d')
+                    df = df[df['expiry'] <= max_expiry]
+                    if len(df) < before:
+                        filter_reasons.append(f"max_dte={self.trading_config.max_dte}d")
+
+                # Filter by bid-ask spread
+                if self.trading_config.max_spread_pct < 100.0:
+                    before = len(df)
+                    df = df[df['spread_pct'] <= self.trading_config.max_spread_pct]
+                    if len(df) < before:
+                        filter_reasons.append(f"max_spread<{self.trading_config.max_spread_pct:.0f}%")
+
+                if df.empty:
+                    print(f"    Found {original_count} opportunities, but none passed filters:")
+                    print(f"    Filtered by: {', '.join(filter_reasons)}")
+                    continue
+
                 # Take best opportunity
-                print(f"    Found {len(df)} opportunities")
+                print(f"    Found {len(df)} opportunities (filtered from {original_count})")
                 best_opp = df.iloc[0]
                 print(f"    Best: {best_opp['signal']} ${best_opp['strike']:.0f} @ ${best_opp['market_mid']:.2f} ({best_opp['edge_pct']:+.1f}%)")
 
@@ -244,6 +291,21 @@ class AutomatedTrader:
         print(f"    {opportunity['type']} ${opportunity['strike']:.0f} exp {opportunity['expiry']}")
         print(f"    Edge: {opportunity['edge_score']:.1f}% | Market: ${opportunity['market_mid']:.2f}")
 
+        # Calculate position size
+        quantity = self.calculate_position_size(opportunity)
+        position_value = quantity * opportunity['market_mid'] * 100
+        position_pct = (position_value / self.ib.account_value) * 100
+
+        print(f"    Position sizing:")
+        print(f"      Quantity: {quantity} contracts")
+        print(f"      Premium: ${opportunity['market_mid']:.2f} × {quantity} × 100 = ${position_value:,.0f}")
+        print(f"      Portfolio %: {position_pct:.2f}%")
+        if 'SELL' in opportunity['signal']:
+            notional_risk = quantity * opportunity['strike'] * 100
+            notional_pct = (notional_risk / self.ib.account_value) * 100
+            print(f"      Notional risk (if assigned): ${notional_risk:,.0f} ({notional_pct:.1f}% of account)")
+        print(f"      IV: {opportunity.get('iv', 0.30)*100:.1f}%")
+
         # Create contract
         expiry_formatted = opportunity['expiry'].replace('-', '')  # YYYYMMDD format
         right = 'P' if opportunity['type'] == 'PUT' else 'C'
@@ -258,35 +320,37 @@ class AutomatedTrader:
         # Determine action
         action = 'BUY' if 'BUY' in opportunity['signal'] else 'SELL'
 
-        # Get live market data
+        # Try to get live market data (will fail if no options subscription)
         market_data = self.ib.get_market_data(contract, timeout=10)
-
-        if not market_data:
-            print(f"    ✗ Could not get market data")
-            return
 
         # Validate market data
         import math
-        if (market_data.get('bid') is None or
-            market_data.get('ask') is None or
-            math.isnan(market_data.get('bid', float('nan'))) or
-            math.isnan(market_data.get('ask', float('nan'))) or
-            market_data['bid'] <= 0 or
-            market_data['ask'] <= 0):
-            print(f"    ✗ Invalid market data: bid={market_data.get('bid')}, ask={market_data.get('ask')}")
-            print(f"    ℹ️  This is usually due to market data subscription issues")
-            print(f"    ℹ️  Enable delayed data in IB Gateway or use market mid price")
+        has_valid_data = False
+        if market_data:
+            if (market_data.get('bid') and
+                market_data.get('ask') and
+                not math.isnan(market_data.get('bid', float('nan'))) and
+                not math.isnan(market_data.get('ask', float('nan'))) and
+                market_data['bid'] > 0 and
+                market_data['ask'] > 0):
+                has_valid_data = True
 
+        if not has_valid_data:
             # Fallback: use the market_mid from edge scanner
+            # This is common when you don't have options market data subscription
+            print(f"    ℹ️  Using scanner price (no live options data)")
+
             if self.trading_config.use_limit_orders:
                 limit_price = opportunity['market_mid']
-                print(f"    → Using scanner market mid: ${limit_price:.2f}")
+                print(f"    → Limit price: ${limit_price:.2f}")
                 order_type = 'LMT'
             else:
                 limit_price = None
                 order_type = 'MKT'
         else:
-            # Determine price from valid market data
+            # Use live market data
+            print(f"    ℹ️  Using live market data (bid: ${market_data['bid']:.2f}, ask: ${market_data['ask']:.2f})")
+
             if self.trading_config.use_limit_orders:
                 if action == 'BUY':
                     limit_price = market_data['ask'] * 0.995  # Slightly below ask
@@ -303,7 +367,7 @@ class AutomatedTrader:
             trade = self.ib.place_order(
                 contract=contract,
                 action=action,
-                quantity=1,
+                quantity=quantity,
                 order_type=order_type,
                 limit_price=limit_price,
                 transmit=True
@@ -407,12 +471,56 @@ class AutomatedTrader:
 
         # Check max positions
         if len(self.positions) >= self.risk_limits.max_positions:
+            print(f"    Max positions reached: {len(self.positions)}/{self.risk_limits.max_positions}")
+            if len(self.positions) > 0:
+                print(f"    Current positions:")
+                for key, pos in list(self.positions.items())[:5]:  # Show first 5
+                    print(f"      - {key}: qty={pos.get('quantity', 'N/A')}, P&L=${pos.get('unrealized_pnl', 0):.2f}")
             return True
 
         return False
 
+    def calculate_position_size(self, opportunity: pd.Series) -> int:
+        """
+        Calculate optimal position size based on:
+        1. Target % of portfolio (max_position_size)
+        2. Volatility adjustment (higher IV = smaller size)
+        3. Risk limits (max notional exposure)
+
+        Returns: Number of contracts to trade
+        """
+        account_value = self.ib.account_value
+        option_price = opportunity['market_mid']
+        iv = opportunity.get('iv', 0.30)  # Implied volatility
+        strike = opportunity['strike']
+
+        # Base position size: target % of account
+        target_value = account_value * self.risk_limits.max_position_size
+        base_contracts = int(target_value / (option_price * 100))
+
+        # Volatility adjustment factor
+        # Higher IV = more risk → reduce position size
+        # Use 30% IV as baseline (typical for equity options)
+        baseline_iv = 0.30
+        vol_adjustment = baseline_iv / max(iv, 0.15)  # Don't divide by tiny numbers
+        vol_adjusted_contracts = int(base_contracts * vol_adjustment)
+
+        # Risk limit: for selling puts, max notional is strike * contracts * 100
+        # Cap at 20% of account (max_portfolio_exposure)
+        if 'SELL' in opportunity['signal']:
+            max_notional = account_value * self.risk_limits.max_portfolio_exposure
+            max_contracts_by_notional = int(max_notional / (strike * 100))
+            final_contracts = min(vol_adjusted_contracts, max_contracts_by_notional)
+        else:
+            final_contracts = vol_adjusted_contracts
+
+        # Minimum 1 contract
+        final_contracts = max(1, final_contracts)
+
+        return final_contracts
+
     def check_position_size(self, option_price: float) -> bool:
-        """Check if position size is within limits"""
+        """Check if position size is within limits (legacy method)"""
         account_value = self.ib.account_value
         position_value = option_price * 100  # Options are per 100 shares
 
@@ -422,6 +530,13 @@ class AutomatedTrader:
 
     def record_trade(self, opportunity: pd.Series, action: str, trade):
         """Record trade in log"""
+        # Extract order ID from trade object (ib_insync Trade object)
+        order_id = getattr(trade, 'order', None)
+        if order_id:
+            order_id = getattr(order_id, 'orderId', 'N/A')
+        else:
+            order_id = 'N/A'
+
         log_entry = {
             'timestamp': datetime.now().isoformat(),
             'ticker': opportunity['ticker'],
@@ -431,7 +546,7 @@ class AutomatedTrader:
             'action': action,
             'edge_score': opportunity['edge_score'],
             'market_mid': opportunity['market_mid'],
-            'order_id': trade.get('order_id', 'N/A')
+            'order_id': order_id
         }
 
         self.trading_log.append(log_entry)

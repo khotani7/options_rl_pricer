@@ -54,9 +54,27 @@ def main():
     parser.add_argument('--stop-loss', type=float, default=30.0,
                        help='Stop loss % per position')
     parser.add_argument('--max-position-size', type=float, default=5.0,
-                       help='Max position size as % of account (default: 5.0)')
+                       help='Max position size as %% of account (premium-based, default: 5.0)')
+    parser.add_argument('--max-notional', type=float, default=50.0,
+                       help='Max notional exposure per position as %% of account (for short options, default: 50.0)')
     parser.add_argument('--client-id', type=int, default=1,
                        help='IB API client ID (use different IDs for multiple connections)')
+    parser.add_argument('--use-market-orders', action='store_true',
+                       help='Use market orders instead of limit orders (helps with market data issues)')
+    parser.add_argument('--min-premium', type=float, default=0.0,
+                       help='Minimum option premium in $ (e.g., 0.50 to avoid tiny premiums)')
+    parser.add_argument('--min-moneyness', type=float, default=0.85,
+                       help='Minimum moneyness ratio (default: 0.85 = 85%% of spot)')
+    parser.add_argument('--max-moneyness', type=float, default=1.15,
+                       help='Maximum moneyness ratio (default: 1.15 = 115%% of spot)')
+    parser.add_argument('--min-dte', type=int, default=0,
+                       help='Minimum days to expiration (e.g., 7 to avoid weeklies)')
+    parser.add_argument('--max-dte', type=int, default=365,
+                       help='Maximum days to expiration (e.g., 45 for faster theta decay)')
+    parser.add_argument('--max-spread-pct', type=float, default=100.0,
+                       help='Maximum bid-ask spread as %% of mid (e.g., 15 = reject if spread > 15%%)')
+    parser.add_argument('--min-iv-percentile', type=float, default=0.0,
+                       help='Minimum IV percentile (0-100, e.g., 50 = only trade when IV > median)')
 
     args = parser.parse_args()
 
@@ -98,9 +116,9 @@ def main():
         max_positions=args.max_positions,
         max_daily_loss=args.max_daily_loss / 100.0,
         min_edge_threshold_pct=args.min_edge,
-        stop_loss_pct=args.stop_loss / 100.0,
+        stop_loss_multiplier=1 + (args.stop_loss / 100.0),  # Convert % to multiplier (e.g., 30% -> 1.3x)
         max_position_size=args.max_position_size / 100.0,
-        max_portfolio_exposure=0.20  # 20% total exposure
+        max_portfolio_exposure=args.max_notional / 100.0
     )
 
     trading_config = TradingConfig(
@@ -108,8 +126,15 @@ def main():
         tickers=args.tickers,
         scan_interval_minutes=args.scan_interval,
         max_trades_per_day=10,
-        use_limit_orders=True,
-        log_file=f'outputs/trading_log_{args.mode}.json'
+        use_limit_orders=not args.use_market_orders,
+        log_file=f'outputs/trading_log_{args.mode}.json',
+        min_premium=args.min_premium,
+        min_moneyness=args.min_moneyness,
+        max_moneyness=args.max_moneyness,
+        min_dte=args.min_dte,
+        max_dte=args.max_dte,
+        max_spread_pct=args.max_spread_pct,
+        min_iv_percentile=args.min_iv_percentile
     )
 
     # Create and start trader
